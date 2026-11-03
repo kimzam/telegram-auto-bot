@@ -1,11 +1,5 @@
-﻿"""
+"""
 Бот-автоответчик на aiogram 3 для Render.
-
-Переменные окружения (задаются в настройках Render, НЕ в коде):
-  BOT_TOKEN  - токен от @BotFather
-  OWNER_ID   - ваш числовой Telegram ID (узнать у @userinfobot)
-  IS_AWAY    - "true" / "false": стартовое состояние автоответчика (по умолчанию true)
-  PORT       - порт HTTP-сервера (Render задаёт сам; по умолчанию 10000)
 """
 
 import asyncio
@@ -24,16 +18,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
 PORT = int(os.getenv("PORT", "10000"))
 
-# Текст автоответа: меняйте здесь
 AWAY_TEXT = "Привет! Сейчас меня нет на месте / я занят. Отвечу, как освобожусь!"
-
-# Кулдаун: не чаще одного автоответа одному человеку раз в N секунд
-COOLDOWN_SECONDS = 10
-
-# Имитация "человек печатает": случайная пауза в этом диапазоне (секунды)
+COOLDOWN_SECONDS = 10  # Уменьшено для теста, потом можно вернуть 15 * 60
 DELAY_MIN, DELAY_MAX = 2.0, 4.0
 
-# Флаг: True = автоответчик включён. Переключается командами /away и /online
 IS_AWAY = os.getenv("IS_AWAY", "true").strip().lower() in ("1", "true", "yes", "on")
 # =========================================================
 
@@ -46,10 +34,9 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Бот работает только в личных сообщениях: группы, чаты и каналы игнорируются
+# Бот работает только в личных сообщениях
 dp.message.filter(F.chat.type == "private")
 
-# user_id -> время последнего автоответа (unix-время)
 last_reply: dict[int, float] = {}
 
 
@@ -65,7 +52,7 @@ async def cmd_away(message: Message):
 async def cmd_online(message: Message):
     global IS_AWAY
     IS_AWAY = False
-    last_reply.clear()  # при следующем уходе все получат ответ заново
+    last_reply.clear()
     await message.answer("🟢 Автоответчик выключен, вы в сети.")
 
 
@@ -87,55 +74,41 @@ async def autoreply(message: Message):
     now = time.time()
     if now - last_reply.get(user.id, 0) < COOLDOWN_SECONDS:
         return
-    # Фиксируем время сразу, чтобы несколько быстрых сообщений подряд
-    # не вызвали несколько ответов, пока идёт пауза
     last_reply[user.id] = now
 
-    # Имитация набора текста
     await bot.send_chat_action(message.chat.id, "typing")
     await asyncio.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
-
     await message.answer(AWAY_TEXT)
 
 
-# ---------- HTTP-сервер для Render ----------
-async def health(request: web.Request) -> web.Response:
-    return web.Response(text="OK")
+# ---------- HTTP-сервер для Render / UptimeRobot ----------
+async def handle(request: web.Request) -> web.Response:
+    return web.Response(text="I am alive!")
 
 
 async def start_web_server() -> web.AppRunner:
     app = web.Application()
-    app.router.add_get("/", health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    await web.TCPSite(runner, host="0.0.0.0", port=PORT).start()
-    logging.info("HTTP-сервер запущен на порту %s", PORT)
-    return runner
-
-import os
-from aiohttp import web
-
-# --- ВЕБ-СЕРВЕР ДЛЯ UPTIMEROBOT ---
-async def handle(request):
-    return web.Response(text="I am alive!")
-
-async def start_web_server():
-    app = web.Application()
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
     await site.start()
+    logging.info("HTTP-сервер запущен на порту %s", PORT)
+    return runner
 
-# --- ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
+
+# ---------- ОСНОВНАЯ ТОЧКА ЗАПУСКА ----------
 async def main():
-    # Запускаем веб-сервер для пинга
-    await start_web_server()
+    # Запускаем веб-сервер для пингов
+    runner = await start_web_server()
     
-    # Запускаем бота
-    print("Бот запущен...")
-    await dp.start_polling(bot)
+    try:
+        # Сбрасываем старые вебхуки/сессии, чтобы избежать конфликтов
+        await bot.delete_webhook(drop_pending_updates=True)
+        print("Бот запущен и слушает обновления...")
+        await dp.start_polling(bot)
+    finally:
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
