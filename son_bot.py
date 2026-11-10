@@ -1,114 +1,114 @@
-"""
-Бот-автоответчик на aiogram 3 для Render.
-"""
-
 import asyncio
 import logging
 import os
-import random
-import time
+from html import escape
 
-from aiohttp import web
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart
 from aiogram.types import Message
 
-# ======================= НАСТРОЙКИ =======================
+# ---------- Настройки из переменных окружения ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = os.getenv("OWNER_ID")
-PORT = int(os.getenv("PORT", "10000"))
+GROUP_ID = os.getenv("GROUP_ID")          # например: -1001234567890
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS")    # например: 111111111,222222222
 
-AWAY_TEXT = "Привет! Сейчас меня нет на месте / я занят. Отвечу, как освобожусь!"
-COOLDOWN_SECONDS = 10  # Уменьшено для теста, потом можно вернуть 15 * 60
-DELAY_MIN, DELAY_MAX = 2.0, 4.0
+LINK_TEXT = os.getenv("LINK_TEXT", "Музыка ИИ")
+LINK_URL = os.getenv("LINK_URL", "https://t.me/your_channel")
 
-IS_AWAY = os.getenv("IS_AWAY", "true").strip().lower() in ("1", "true", "yes", "on")
-# =========================================================
+if not BOT_TOKEN or not GROUP_ID or not ADMIN_IDS_RAW:
+    raise RuntimeError(
+        "Не заданы переменные окружения: BOT_TOKEN, GROUP_ID, ADMIN_IDS"
+    )
 
-if not BOT_TOKEN or not OWNER_ID:
-    raise RuntimeError("Не заданы переменные окружения: BOT_TOKEN, OWNER_ID")
-OWNER_ID = int(OWNER_ID)
+GROUP_ID = int(GROUP_ID)
+
+# Разбираем список ID: допускаются запятые, пробелы и точки с запятой
+ADMIN_IDS = {
+    int(x)
+    for x in ADMIN_IDS_RAW.replace(";", ",").replace(" ", ",").split(",")
+    if x.strip()
+}
+if not ADMIN_IDS:
+    raise RuntimeError("ADMIN_IDS пуст: укажите хотя бы один Telegram ID")
 
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
 dp = Dispatcher()
 
-# Бот работает только в личных сообщениях
-dp.message.filter(F.chat.type == "private")
-
-last_reply: dict[int, float] = {}
-
-
-# ---------- Команды владельца ----------
-@dp.message(Command("away"), F.from_user.id == OWNER_ID)
-async def cmd_away(message: Message):
-    global IS_AWAY
-    IS_AWAY = True
-    await message.answer("🔴 Автоответчик включён.")
+# Хендлеры срабатывают только в личке и только для ID из списка.
+# Остальные сообщения не обрабатываются и остаются без ответа.
+dp.message.filter(
+    F.chat.type == "private",
+    F.from_user.id.in_(ADMIN_IDS),
+)
 
 
-@dp.message(Command("online"), F.from_user.id == OWNER_ID)
-async def cmd_online(message: Message):
-    global IS_AWAY
-    IS_AWAY = False
-    last_reply.clear()
-    await message.answer("🟢 Автоответчик выключен, вы в сети.")
+def build_caption() -> str:
+    """Подпись со скрытой гиперссылкой (HTML)."""
+    return f'🎵 <a href="{escape(LINK_URL, quote=True)}">{escape(LINK_TEXT)}</a>'
 
 
-@dp.message(Command("status"), F.from_user.id == OWNER_ID)
-async def cmd_status(message: Message):
-    state = "включён 🔴" if IS_AWAY else "выключен 🟢"
-    await message.answer(f"Автоответчик {state}")
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
+    await message.answer("Привет! Отправь мне аудиофайл, и я перешлю его в группу.")
 
 
-# ---------- Автоответ всем остальным ----------
-@dp.message()
-async def autoreply(message: Message):
-    user = message.from_user
-    if user is None or user.is_bot or user.id == OWNER_ID:
-        return
-    if not IS_AWAY:
-        return
-
-    now = time.time()
-    if now - last_reply.get(user.id, 0) < COOLDOWN_SECONDS:
-        return
-    last_reply[user.id] = now
-
-    await bot.send_chat_action(message.chat.id, "typing")
-    await asyncio.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
-    await message.answer(AWAY_TEXT)
-
-
-# ---------- HTTP-сервер для Render / UptimeRobot ----------
-async def handle(request: web.Request) -> web.Response:
-    return web.Response(text="I am alive!")
-
-
-async def start_web_server() -> web.AppRunner:
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
-    await site.start()
-    logging.info("HTTP-сервер запущен на порту %s", PORT)
-    return runner
-
-
-# ---------- ОСНОВНАЯ ТОЧКА ЗАПУСКА ----------
-async def main():
-    # Запускаем веб-сервер для пингов
-    runner = await start_web_server()
-    
+@dp.message(F.audio)
+async def handle_audio(message: Message):
     try:
-        # Сбрасываем старые вебхуки/сессии, чтобы избежать конфликтов
-        await bot.delete_webhook(drop_pending_updates=True)
-        print("Бот запущен и слушает обновления...")
-        await dp.start_polling(bot)
-    finally:
-        await runner.cleanup()
+        await bot.send_audio(
+            chat_id=GROUP_ID,
+            audio=message.audio.file_id,
+            caption=build_caption(),
+            title=message.audio.title,
+            performer=message.audio.performer,
+            duration=message.audio.duration,
+        )
+        await message.answer("✅ Отправлено в группу.")
+    except Exception as e:
+        logging.exception("Ошибка при отправке аудио")
+        await message.answer(f"❌ Не удалось отправить: {e}")
+
+
+@dp.message(F.document & F.document.mime_type.startswith("audio/"))
+async def handle_audio_document(message: Message):
+    """Если музыка пришла как файл (документ), а не как аудио."""
+    try:
+        await bot.send_document(
+            chat_id=GROUP_ID,
+            document=message.document.file_id,
+            caption=build_caption(),
+        )
+        await message.answer("✅ Отправлено в группу.")
+    except Exception as e:
+        logging.exception("Ошибка при отправке документа")
+        await message.answer(f"❌ Не удалось отправить: {e}")
+
+
+@dp.message(F.voice)
+async def handle_voice(message: Message):
+    try:
+        await bot.send_voice(
+            chat_id=GROUP_ID,
+            voice=message.voice.file_id,
+            caption=build_caption(),
+        )
+        await message.answer("✅ Отправлено в группу.")
+    except Exception as e:
+        logging.exception("Ошибка при отправке голосового")
+        await message.answer(f"❌ Не удалось отправить: {e}")
+
+
+async def main():
+    logging.info("Разрешённые администраторы: %s", sorted(ADMIN_IDS))
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
